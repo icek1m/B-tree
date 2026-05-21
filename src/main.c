@@ -1,6 +1,9 @@
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include "page.h"
 #include "comparator.h"
+#include "btree.h"
 
 static void test_page_init(void) {
     printf("== test_page_init ==\n");
@@ -154,7 +157,267 @@ static void test_comparator(void) {
     printf("  PASSED\n\n");
 }
 
-int main(void) {
+/* ════════════════════════════════════════════════════════════════
+ *  B+ 树测试 — 内存存储适配器
+ * ════════════════════════════════════════════════════════════════ */
+
+#define MEM_MAX_PAGES 2048
+
+typedef struct
+{
+    page_t pages[MEM_MAX_PAGES];
+    int    num_pages;
+} mem_store_t;
+
+static void mem_store_init(mem_store_t *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->num_pages = 0;
+}
+
+static btree_error_t mem_read(void *ctx, page_id_t pid, page_t *page)
+{
+    mem_store_t *s = (mem_store_t *)ctx;
+    if (pid >= (page_id_t)s->num_pages)
+        return BTREE_IO_ERROR;
+    *page = s->pages[pid];
+    return BTREE_OK;
+}
+
+static btree_error_t mem_write(void *ctx, page_id_t pid, const page_t *page)
+{
+    mem_store_t *s = (mem_store_t *)ctx;
+    if (pid >= (page_id_t)s->num_pages)
+        return BTREE_IO_ERROR;
+    s->pages[pid] = *page;
+    return BTREE_OK;
+}
+
+static btree_error_t mem_alloc(void *ctx, page_id_t *pid, page_type_t type)
+{
+    mem_store_t *s = (mem_store_t *)ctx;
+    if (s->num_pages >= MEM_MAX_PAGES)
+        return BTREE_IO_ERROR;
+    *pid = (page_id_t)s->num_pages;
+    page_init(&s->pages[s->num_pages], *pid, type);
+    s->num_pages++;
+    return BTREE_OK;
+}
+
+/* ─── 测试：基本 Put / Get ─── */
+
+static void test_btree_basic(void)
+{
+    printf("== test_btree_basic ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    uint8_t buf[64];
+    uint16_t len;
+
+    btree_put(tree, (const uint8_t *)"alpha", 5, (const uint8_t *)"apple",  5);
+    btree_put(tree, (const uint8_t *)"beta",  4, (const uint8_t *)"banana", 6);
+    btree_put(tree, (const uint8_t *)"gamma", 5, (const uint8_t *)"grape",  5);
+
+    len = sizeof(buf);
+    printf("  get alpha:  %d ", btree_get(tree, (const uint8_t *)"alpha", 5, buf, &len));
+    buf[len] = '\0';
+    printf("'%s' len=%d (expect 0 'apple' 5)\n", buf, len);
+
+    len = sizeof(buf);
+    printf("  get beta:   %d ", btree_get(tree, (const uint8_t *)"beta", 4, buf, &len));
+    buf[len] = '\0';
+    printf("'%s' len=%d (expect 0 'banana' 6)\n", buf, len);
+
+    len = sizeof(buf);
+    printf("  get gamma:  %d ", btree_get(tree, (const uint8_t *)"gamma", 5, buf, &len));
+    buf[len] = '\0';
+    printf("'%s' len=%d (expect 0 'grape' 5)\n", buf, len);
+
+    /* 不存在的 key */
+    btree_error_t e = btree_get(tree, (const uint8_t *)"delta", 5, buf, &len);
+    printf("  get delta:  %d (expect %d - NOT_FOUND)\n", e, BTREE_NOT_FOUND);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：更新 ─── */
+
+static void test_btree_update(void)
+{
+    printf("== test_btree_update ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    uint8_t buf[64];
+    uint16_t len;
+
+    btree_put(tree, (const uint8_t *)"key", 3, (const uint8_t *)"old_value", 9);
+
+    btree_put(tree, (const uint8_t *)"key", 3, (const uint8_t *)"new_value", 9);
+
+    len = sizeof(buf);
+    btree_get(tree, (const uint8_t *)"key", 3, buf, &len);
+    buf[len] = '\0';
+    printf("  get key: '%s' (expect 'new_value')\n", buf);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：删除 ─── */
+
+static void test_btree_delete(void)
+{
+    printf("== test_btree_delete ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    uint8_t buf[64];
+    uint16_t len;
+
+    btree_put(tree, (const uint8_t *)"live",  4, (const uint8_t *)"alive", 5);
+    btree_put(tree, (const uint8_t *)"dead",  4, (const uint8_t *)"gone",  4);
+
+    printf("  delete dead: %d (expect 0)\n",
+           btree_delete(tree, (const uint8_t *)"dead", 4));
+    printf("  delete dead again: %d (expect %d - NOT_FOUND)\n",
+           btree_delete(tree, (const uint8_t *)"dead", 4), BTREE_NOT_FOUND);
+
+    len = sizeof(buf);
+    printf("  get live: %d (expect 0)\n",
+           btree_get(tree, (const uint8_t *)"live", 4, buf, &len));
+    len = sizeof(buf);
+    printf("  get dead: %d (expect %d - NOT_FOUND)\n",
+           btree_get(tree, (const uint8_t *)"dead", 4, buf, &len), BTREE_NOT_FOUND);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：覆盖已删除的 key ─── */
+
+static void test_btree_overwrite_deleted(void)
+{
+    printf("== test_btree_overwrite_deleted ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    uint8_t buf[64];
+    uint16_t len;
+
+    btree_put(tree, (const uint8_t *)"x", 1, (const uint8_t *)"first",  5);
+    btree_delete(tree, (const uint8_t *)"x", 1);
+    btree_put(tree, (const uint8_t *)"x", 1, (const uint8_t *)"second", 6);
+
+    len = sizeof(buf);
+    btree_get(tree, (const uint8_t *)"x", 1, buf, &len);
+    buf[len] = '\0';
+    printf("  get x: '%s' (expect 'second')\n", buf);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：叶子分裂 ─── */
+
+static void test_btree_split(void)
+{
+    printf("== test_btree_split ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 500;
+    char key[8], val[8];
+
+    /* 写入 N 条顺序递增的记录 */
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    /* 逐条读出验证 */
+    int ok = 0;
+    uint8_t buf[64];
+    uint16_t len;
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  %d/%d records verified (expect %d)\n", ok, N, N);
+
+    /* 不存在的 key 应返回 NOT_FOUND */
+    btree_error_t e = btree_get(tree, (const uint8_t *)"k999", 4, buf, &len);
+    printf("  get k999: %d (expect %d - NOT_FOUND)\n", e, BTREE_NOT_FOUND);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：逆序插入 ─── */
+
+static void test_btree_reverse_insert(void)
+{
+    printf("== test_btree_reverse_insert ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 200;
+    char key[8], val[8];
+
+    for (int i = N - 1; i >= 0; i--)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    int ok = 0;
+    uint8_t buf[64];
+    uint16_t len;
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  %d/%d records verified (expect %d)\n", ok, N, N);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+int main(void)
+{
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
 
     test_page_init();
@@ -162,6 +425,15 @@ int main(void) {
     test_slot_remove_and_compact();
     test_internal_records();
     test_comparator();
+
+    printf("=== B+ Tree 核心操作验证 ===\n\n");
+
+    test_btree_basic();
+    test_btree_update();
+    test_btree_delete();
+    test_btree_overwrite_deleted();
+    test_btree_split();
+    test_btree_reverse_insert();
 
     printf("=== 全部测试通过 ===\n");
     return 0;

@@ -60,6 +60,36 @@ int page_alloc_slot(page_t *page, const uint8_t *data, uint16_t len)
     return (int)(page->header.num_slots - 1);
 }
 
+int page_insert_slot(page_t *page, int idx, const uint8_t *data, uint16_t len)
+{
+    int n = (int)page->header.num_slots;
+    if (idx < 0 || idx > n)
+        return -1;
+
+    uint16_t front_end = (uint16_t)(PAGE_HEADER_SIZE + n * sizeof(slot_t));
+
+    if (page->header.free_offset < front_end + sizeof(slot_t) + len)
+        return -1;
+
+    uint16_t rec_off = page->header.free_offset - len;
+    memcpy(page->bytes + rec_off, data, len);
+
+    uint8_t *slot_base = page->bytes + PAGE_HEADER_SIZE;
+    memmove(slot_base + (size_t)(idx + 1) * sizeof(slot_t),
+            slot_base + (size_t)idx * sizeof(slot_t),
+            (size_t)(n - idx) * sizeof(slot_t));
+
+    slot_t *s = (slot_t *)(slot_base + (size_t)idx * sizeof(slot_t));
+    s->offset = rec_off;
+    s->length = len;
+
+    page->header.num_slots++;
+    page->header.free_offset = rec_off;
+    page->header.free_size = rec_off - PAGE_HEADER_SIZE - page->header.num_slots * sizeof(slot_t);
+
+    return idx;
+}
+
 void page_remove_slot(page_t *page, int idx)
 {
     int n = (int)page->header.num_slots;

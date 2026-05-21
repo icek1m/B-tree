@@ -85,6 +85,9 @@ static inline void page_set_first_child(page_t *p, page_id_t pid) { p->header.fi
 /* 分配一个新槽：将 data 写入空闲区，在目录尾部追加一个槽项，返回槽索引 */
 int page_alloc_slot(page_t *page, const uint8_t *data, uint16_t len);
 
+/* 在指定位置 idx 插入一个新槽，data 写入空闲区，已有槽项右移，返回 idx */
+int page_insert_slot(page_t *page, int idx, const uint8_t *data, uint16_t len);
+
 /* 删除指定槽（压缩数据区），保持剩余记录连续 */
 void page_remove_slot(page_t *page, int idx);
 
