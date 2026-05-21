@@ -5,6 +5,7 @@
 #include "comparator.h"
 #include "btree.h"
 #include "storage.h"
+#include "buffer_pool.h"
 
 static void test_page_init(void)
 {
@@ -677,6 +678,208 @@ static void test_storage_persistence(void)
     printf("  PASSED\n\n");
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  缓冲池测试
+ * ════════════════════════════════════════════════════════════════ */
+
+/* ─── 测试：缓冲池基本读写 ─── */
+
+static void test_buffer_pool_basic(void)
+{
+    printf("== test_buffer_pool_basic ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_buffer_pool_t *bp = bp_create(0, /* 默认容量 */
+                                         mem_read, mem_write, mem_alloc, &store);
+    btree_t *tree = btree_create(compare_default,
+                                  bp_read, bp_write, bp_alloc, bp);
+
+    uint8_t buf[64];
+    uint16_t len;
+    int const N = 100;
+
+    for (int i = 0; i < N; i++)
+    {
+        char k[8], v[8];
+        snprintf(k, sizeof(k), "k%03d", i);
+        snprintf(v, sizeof(v), "v%03d", i);
+        btree_put(tree, (const uint8_t *)k, 4, (const uint8_t *)v, 4);
+    }
+
+    int ok = 0;
+    for (int i = 0; i < N; i++)
+    {
+        char k[8], v[8];
+        snprintf(k, sizeof(k), "k%03d", i);
+        snprintf(v, sizeof(v), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)k, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, v, 4) == 0)
+            ok++;
+    }
+    printf("  %d/%d records (expect %d)\n", ok, N, N);
+    printf("  hits=%u misses=%u\n", bp_hit_count(bp), bp_miss_count(bp));
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：缓冲池淘汰 ─── */
+
+static void test_buffer_pool_eviction(void)
+{
+    printf("== test_buffer_pool_eviction ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    /* 小容量强制频繁淘汰 */
+    btree_buffer_pool_t *bp = bp_create(4,
+                                         mem_read, mem_write, mem_alloc, &store);
+    btree_t *tree = btree_create(compare_default,
+                                  bp_read, bp_write, bp_alloc, bp);
+
+    int const N = 1000;
+    char key[8], val[8];
+    uint8_t buf[64];
+    uint16_t len;
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    int ok = 0;
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  %d/%d records (expect %d)\n", ok, N, N);
+    printf("  hits=%u misses=%u (expect misses >= frames=%u as evidence of eviction)\n",
+           bp_hit_count(bp), bp_miss_count(bp), 4u);
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：缓冲池 + 文件存储持久化 ─── */
+
+static void test_buffer_pool_persistence(void)
+{
+    printf("== test_buffer_pool_persistence ==\n");
+
+    const char *path = "btree_test_bp.bt";
+    int const N = 300;
+    char key[8], val[8];
+    uint8_t buf[64];
+    uint16_t len;
+
+    remove(path);
+
+    /* 第一轮：通过缓冲池写入 */
+    btree_storage_t *store = btree_storage_create(path);
+    btree_buffer_pool_t *bp = bp_create(0,
+                                         btree_storage_read,
+                                         btree_storage_write,
+                                         btree_storage_alloc,
+                                         store);
+    btree_t *tree = btree_create(compare_default,
+                                  bp_read, bp_write, bp_alloc, bp);
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    /* 刷脏页并持久化 root_id */
+    bp_flush_all(bp);
+    btree_storage_set_root_id(store, btree_root_id(tree));
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    btree_storage_close(store);
+
+    /* 第二轮：直接存储打开验证 */
+    store = btree_storage_open(path);
+    page_id_t root;
+    btree_storage_get_root_id(store, &root);
+    tree = btree_open(compare_default,
+                       btree_storage_read, btree_storage_write,
+                       btree_storage_alloc, store, root);
+
+    int ok = 0;
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  reopen (direct): %d/%d (expect %d)\n",
+           ok, N, N);
+
+    btree_destroy(tree);
+    btree_storage_close(store);
+
+    /* 第三轮：缓冲池打开并更新 */
+    store = btree_storage_open(path);
+    btree_storage_get_root_id(store, &root);
+    bp = bp_create(0, btree_storage_read, btree_storage_write,
+                   btree_storage_alloc, store);
+    tree = btree_open(compare_default,
+                       bp_read, bp_write, bp_alloc, bp, root);
+
+    btree_put(tree, (const uint8_t *)"k000", 4, (const uint8_t *)"new0", 4);
+    bp_flush_all(bp);
+    btree_storage_set_root_id(store, btree_root_id(tree));
+    btree_destroy(tree);
+    bp_destroy(bp);
+    btree_storage_close(store);
+
+    /* 第四轮：直接打开验证更新 */
+    store = btree_storage_open(path);
+    btree_storage_get_root_id(store, &root);
+    tree = btree_open(compare_default,
+                       btree_storage_read, btree_storage_write,
+                       btree_storage_alloc, store, root);
+
+    len = sizeof(buf);
+    btree_error_t e = btree_get(tree, (const uint8_t *)"k000", 4, buf, &len);
+    buf[len] = '\0';
+    printf("  get k000 after update: err=%d val='%s' (expect 0 'new0')\n", e, buf);
+
+    ok = 0;
+    for (int i = 1; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  remaining after update: %d/%d (expect %d)\n", ok, N - 1, N - 1);
+
+    btree_destroy(tree);
+    btree_storage_close(store);
+    remove(path);
+
+    printf("  PASSED\n\n");
+}
+
 int main(void)
 {
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
@@ -705,6 +908,12 @@ int main(void)
     printf("=== 文件存储持久化验证 ===\n\n");
 
     test_storage_persistence();
+
+    printf("=== 缓冲池验证 ===\n\n");
+
+    test_buffer_pool_basic();
+    test_buffer_pool_eviction();
+    test_buffer_pool_persistence();
 
     printf("=== 全部测试通过 ===\n");
     return 0;
