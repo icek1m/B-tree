@@ -4,7 +4,7 @@ LDFLAGS := -lpthread
 SRC_DIR := src
 BUILD   := build
 
-SRCS := $(SRC_DIR)/main.c $(SRC_DIR)/page.c $(SRC_DIR)/comparator.c $(SRC_DIR)/btree.c $(SRC_DIR)/storage.c $(SRC_DIR)/buffer_pool.c $(SRC_DIR)/wal.c $(SRC_DIR)/cursor.c $(SRC_DIR)/txn.c
+SRCS := $(SRC_DIR)/main.c $(SRC_DIR)/page.c $(SRC_DIR)/comparator.c $(SRC_DIR)/btree.c $(SRC_DIR)/storage.c $(SRC_DIR)/buffer_pool.c $(SRC_DIR)/wal.c $(SRC_DIR)/cursor.c $(SRC_DIR)/txn.c $(SRC_DIR)/leaderboard.c $(SRC_DIR)/test.c
 OBJS := $(SRCS:$(SRC_DIR)/%.c=$(BUILD)/%.o)
 TARGET := btree_engine
 
