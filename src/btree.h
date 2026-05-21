@@ -39,6 +39,11 @@ extern "C"
     /* 获取当前根节点页号 */
     page_id_t btree_root_id(btree_t *tree);
 
+    /* 内部字段访问器（供 cursor 等模块使用） */
+    btree_compare_t   btree_comparator(btree_t *tree);
+    btree_read_page_t btree_reader(btree_t *tree);
+    void             *btree_context(btree_t *tree);
+
     /* ─── 核心操作 ─── */
     btree_error_t btree_get(btree_t *tree,
                             const uint8_t *key, uint16_t key_len,

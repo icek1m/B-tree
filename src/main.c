@@ -7,6 +7,7 @@
 #include "storage.h"
 #include "buffer_pool.h"
 #include "wal.h"
+#include "cursor.h"
 
 static void test_page_init(void)
 {
@@ -1155,6 +1156,396 @@ static void test_wal_full_persistence(void)
     printf("  PASSED\n\n");
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  游标测试
+ * ════════════════════════════════════════════════════════════════ */
+
+/* ─── 辅助：向树中插入 N 条 k%03d → v%03d 记录 ─── */
+static void populate_btree(btree_t *tree, int n)
+{
+    char key[8], val[8];
+    for (int i = 0; i < n; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+}
+
+/* ─── 测试：正向遍历 ─── */
+
+static void test_cursor_forward(void)
+{
+    printf("== test_cursor_forward ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 300);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+    btree_error_t err = btree_cursor_seek(cur, (const uint8_t *)"k000", 4);
+    printf("  seek(k000): %d (expect 0)\n", err);
+
+    int ok = 0;
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+
+    while (btree_cursor_valid(cur))
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+        char ek[16], ev[16];
+        snprintf(ek, sizeof(ek), "k%03d", ok);
+        snprintf(ev, sizeof(ev), "v%03d", ok);
+        if (klen != 4 || vlen != 4
+            || memcmp(key, ek, 4) != 0
+            || memcmp(val, ev, 4) != 0)
+            break;
+        ok++;
+        btree_cursor_next(cur);
+    }
+    printf("  forward %d/%d (expect %d)\n", ok, 300, 300);
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：从中间位置 seek 并遍历 ─── */
+
+static void test_cursor_seek_mid(void)
+{
+    printf("== test_cursor_seek_mid ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 500);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+    btree_error_t err = btree_cursor_seek(cur, (const uint8_t *)"k250", 4);
+    printf("  seek(k250): %d (expect 0)\n", err);
+
+    int ok = 0, start = 250;
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+
+    while (btree_cursor_valid(cur))
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+        char ek[16], ev[16];
+        snprintf(ek, sizeof(ek), "k%03d", start + ok);
+        snprintf(ev, sizeof(ev), "v%03d", start + ok);
+        if (klen != 4 || vlen != 4
+            || memcmp(key, ek, 4) != 0
+            || memcmp(val, ev, 4) != 0)
+            break;
+        ok++;
+        btree_cursor_next(cur);
+    }
+    printf("  from k250: %d/%d (expect %d)\n", ok, 250, 250);
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：反向遍历 ─── */
+
+static void test_cursor_reverse(void)
+{
+    printf("== test_cursor_reverse ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 200);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+    btree_error_t err = btree_cursor_last(cur);
+    printf("  last(): %d (expect 0)\n", err);
+
+    int ok = 0;
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+
+    while (btree_cursor_valid(cur))
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+        int idx = 199 - ok;
+        char ek[16], ev[16];
+        snprintf(ek, sizeof(ek), "k%03d", idx);
+        snprintf(ev, sizeof(ev), "v%03d", idx);
+        if (klen != 4 || vlen != 4
+            || memcmp(key, ek, 4) != 0
+            || memcmp(val, ev, 4) != 0)
+            break;
+        ok++;
+        btree_cursor_prev(cur);
+    }
+    printf("  reverse %d/%d (expect %d)\n", ok, 200, 200);
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：first / last ─── */
+
+static void test_cursor_first_last(void)
+{
+    printf("== test_cursor_first_last ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 100);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+
+    btree_error_t e1 = btree_cursor_first(cur);
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+    if (e1 == BTREE_OK)
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    }
+    printf("  first: err=%d key='%.4s' val='%.4s' (expect 0 'k000' 'v000')\n",
+           e1, key, val);
+
+    btree_error_t e2 = btree_cursor_last(cur);
+    if (e2 == BTREE_OK)
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    }
+    printf("  last:  err=%d key='%.4s' val='%.4s' (expect 0 'k099' 'v099')\n",
+           e2, key, val);
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：范围扫描（seek + 条件终止） ─── */
+
+static void test_cursor_range(void)
+{
+    printf("== test_cursor_range ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 500);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+    btree_error_t err = btree_cursor_seek(cur, (const uint8_t *)"k050", 4);
+    printf("  seek(k050): %d (expect 0)\n", err);
+
+    int ok = 0;
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+    const char *end_key = "k060";
+
+    while (btree_cursor_valid(cur))
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+
+        /* 检查是否超出范围 */
+        if (klen == 4 && compare_default(key, 4,
+                                          (const uint8_t *)end_key, 4) >= 0)
+            break;
+
+        char ek[16], ev[16];
+        snprintf(ek, sizeof(ek), "k%03d", 50 + ok);
+        snprintf(ev, sizeof(ev), "v%03d", 50 + ok);
+        if (klen != 4 || vlen != 4
+            || memcmp(key, ek, 4) != 0
+            || memcmp(val, ev, 4) != 0)
+            break;
+        ok++;
+        btree_cursor_next(cur);
+    }
+    printf("  range k050..k059: %d/10 (expect 10)\n", ok);
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：边界情况 ─── */
+
+static void test_cursor_edge(void)
+{
+    printf("== test_cursor_edge ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+
+    /* 空树 */
+    printf("  empty seek:   %d (expect %d)\n",
+           btree_cursor_seek(cur, (const uint8_t *)"a", 1), BTREE_NOT_FOUND);
+    printf("  empty first:  %d (expect %d)\n",
+           btree_cursor_first(cur), BTREE_NOT_FOUND);
+    printf("  empty last:   %d (expect %d)\n",
+           btree_cursor_last(cur), BTREE_NOT_FOUND);
+    printf("  empty valid:  %d (expect 0)\n", btree_cursor_valid(cur));
+
+    /* 单条记录 */
+    btree_put(tree, (const uint8_t *)"single", 6, (const uint8_t *)"rec", 3);
+
+    btree_error_t se = btree_cursor_seek(cur, (const uint8_t *)"single", 6);
+    uint8_t key[8], val[8];
+    uint16_t klen = sizeof(key), vlen = sizeof(val);
+    if (se == BTREE_OK)
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    printf("  single: err=%d key='%.6s' val='%.3s' (expect 0 'single' 'rec')\n",
+           se, key, val);
+
+    /* 前进超出末尾 */
+    btree_cursor_next(cur);
+    printf("  past end valid: %d (expect 0)\n", btree_cursor_valid(cur));
+    printf("  past end next:  %d (expect %d)\n",
+           btree_cursor_next(cur), BTREE_NOT_FOUND);
+
+    /* 后退超出开头 */
+    btree_cursor_seek(cur, (const uint8_t *)"single", 6);
+    btree_cursor_prev(cur);
+    printf("  before start valid: %d (expect 0)\n", btree_cursor_valid(cur));
+
+    /* seek 到不存在的 key */
+    btree_error_t e = btree_cursor_seek(cur, (const uint8_t *)"zzz", 3);
+    printf("  seek zzz: %d (expect %d)\n", e, BTREE_NOT_FOUND);
+    printf("  zzz valid: %d (expect 0)\n", btree_cursor_valid(cur));
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：正向 + 反向混合遍历 ─── */
+
+static void test_cursor_mixed(void)
+{
+    printf("== test_cursor_mixed ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 100);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+
+    /* seek 到 k050 */
+    btree_cursor_seek(cur, (const uint8_t *)"k050", 4);
+
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+    btree_error_t err;
+
+    /* next → k051 */
+    err = btree_cursor_next(cur);
+    klen = sizeof(key);
+    vlen = sizeof(val);
+    if (err == BTREE_OK)
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    printf("  next: err=%d key='%.4s' (expect 0 'k051')\n", err, key);
+
+    /* prev → k050 */
+    err = btree_cursor_prev(cur);
+    klen = sizeof(key);
+    vlen = sizeof(val);
+    if (err == BTREE_OK)
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    printf("  prev: err=%d key='%.4s' (expect 0 'k050')\n", err, key);
+
+    /* prev → k049 */
+    err = btree_cursor_prev(cur);
+    klen = sizeof(key);
+    vlen = sizeof(val);
+    if (err == BTREE_OK)
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    printf("  prev: err=%d key='%.4s' (expect 0 'k049')\n", err, key);
+
+    /* 再回到 k050 */
+    err = btree_cursor_next(cur);
+    klen = sizeof(key);
+    vlen = sizeof(val);
+    if (err == BTREE_OK)
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+    printf("  next: err=%d key='%.4s' (expect 0 'k050')\n", err, key);
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：通过缓冲池使用游标 ─── */
+
+static void test_cursor_buffer_pool(void)
+{
+    printf("== test_cursor_buffer_pool ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_buffer_pool_t *bp = bp_create(0,
+                                         mem_read, mem_write, mem_alloc, &store);
+    btree_t *tree = btree_create(compare_default,
+                                  bp_read, bp_write, bp_alloc, bp);
+    populate_btree(tree, 200);
+
+    btree_cursor_t *cur = btree_cursor_create(tree);
+    btree_cursor_seek(cur, (const uint8_t *)"k000", 4);
+
+    int ok = 0;
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+    while (btree_cursor_valid(cur))
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+        char ek[16], ev[16];
+        snprintf(ek, sizeof(ek), "k%03d", ok);
+        snprintf(ev, sizeof(ev), "v%03d", ok);
+        if (klen == 4 && vlen == 4
+            && memcmp(key, ek, 4) == 0
+            && memcmp(val, ev, 4) == 0)
+            ok++;
+        else
+            break;
+        btree_cursor_next(cur);
+    }
+    printf("  bp forward %d/%d (expect %d)\n", ok, 200, 200);
+    printf("  hits=%u misses=%u\n", bp_hit_count(bp), bp_miss_count(bp));
+
+    btree_cursor_destroy(cur);
+    btree_destroy(tree);
+    bp_destroy(bp);
+    printf("  PASSED\n\n");
+}
+
 int main(void)
 {
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
@@ -1195,6 +1586,17 @@ int main(void)
     test_wal_page_recovery();
     test_wal_crash_recovery();
     test_wal_full_persistence();
+
+    printf("=== 游标验证 ===\n\n");
+
+    test_cursor_forward();
+    test_cursor_seek_mid();
+    test_cursor_reverse();
+    test_cursor_first_last();
+    test_cursor_range();
+    test_cursor_edge();
+    test_cursor_mixed();
+    test_cursor_buffer_pool();
 
     printf("=== 全部测试通过 ===\n");
     return 0;

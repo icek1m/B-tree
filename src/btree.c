@@ -407,6 +407,10 @@ page_id_t btree_root_id(btree_t *tree)
     return tree->root_id;
 }
 
+btree_compare_t btree_comparator(btree_t *tree)   { return tree->cmp; }
+btree_read_page_t btree_reader(btree_t *tree)     { return tree->read_page; }
+void *btree_context(btree_t *tree)                { return tree->io_ctx; }
+
 void btree_destroy(btree_t *tree)
 {
     free(tree);
