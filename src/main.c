@@ -423,6 +423,167 @@ static void test_btree_reverse_insert(void)
     printf("  PASSED\n\n");
 }
 
+/* ─── 测试：删除合并 — 触发叶子合并 + 根收缩 ─── */
+
+static void test_btree_delete_merge(void)
+{
+    printf("== test_btree_delete_merge ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 300;
+    char key[8], val[8];
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    /* 删除左叶子的大部分记录，触发叶子合并 */
+    for (int i = 0; i < 119; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        btree_delete(tree, (const uint8_t *)key, 4);
+    }
+
+    /* 验证剩余记录 */
+    int ok = 0;
+    uint8_t buf[64];
+    uint16_t len;
+
+    for (int i = 119; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  remaining %d/181 OK\n", ok);
+
+    btree_error_t e = btree_get(tree, (const uint8_t *)"k000", 4, buf, &len);
+    printf("  get k000: %d (expect %d)\n", e, BTREE_NOT_FOUND);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：大规模删除 — 多层合并路径 ─── */
+
+static void test_btree_delete_massive(void)
+{
+    printf("== test_btree_delete_massive ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 800;
+    char key[8], val[8];
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    /* 跨叶子删除大部分记录，触发多层合并 */
+    for (int i = 0; i < N - 5; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        btree_delete(tree, (const uint8_t *)key, 4);
+    }
+
+    /* 剩余 5 条 */
+    int ok = 0;
+    uint8_t buf[64];
+    uint16_t len;
+
+    for (int i = N - 5; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  remaining %d/5 OK\n", ok);
+
+    btree_error_t e = btree_get(tree, (const uint8_t *)"k000", 4, buf, &len);
+    printf("  get k000: %d (expect %d)\n", e, BTREE_NOT_FOUND);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：删除 + 再插入 — 合并后复用 ─── */
+
+static void test_btree_delete_reinsert(void)
+{
+    printf("== test_btree_delete_reinsert ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 300;
+    char key[8], val[8];
+    uint8_t buf[64];
+    uint16_t len;
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    /* 删除全部 */
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        btree_delete(tree, (const uint8_t *)key, 4);
+    }
+
+    /* 验证全删 */
+    btree_error_t e = btree_get(tree, (const uint8_t *)"k000", 4, buf, &len);
+    printf("  after delete all, get k000: %d (expect %d)\n", e, BTREE_NOT_FOUND);
+
+    /* 重新插入 */
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    /* 验证重新插入 */
+    int ok = 0;
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  re-insert %d/%d OK\n", ok, N);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
 int main(void)
 {
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
@@ -441,6 +602,12 @@ int main(void)
     test_btree_overwrite_deleted();
     test_btree_split();
     test_btree_reverse_insert();
+
+    printf("=== B+ Tree 删除合并验证 ===\n\n");
+
+    test_btree_delete_merge();
+    test_btree_delete_massive();
+    test_btree_delete_reinsert();
 
     printf("=== 全部测试通过 ===\n");
     return 0;
