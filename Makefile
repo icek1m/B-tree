@@ -3,7 +3,7 @@ CFLAGS  := -Wall -Wextra -Werror -std=c11 -I src -g -O2
 SRC_DIR := src
 BUILD   := build
 
-SRCS := $(SRC_DIR)/main.c $(SRC_DIR)/page.c $(SRC_DIR)/comparator.c $(SRC_DIR)/btree.c $(SRC_DIR)/storage.c $(SRC_DIR)/buffer_pool.c
+SRCS := $(SRC_DIR)/main.c $(SRC_DIR)/page.c $(SRC_DIR)/comparator.c $(SRC_DIR)/btree.c $(SRC_DIR)/storage.c $(SRC_DIR)/buffer_pool.c $(SRC_DIR)/wal.c
 OBJS := $(SRCS:$(SRC_DIR)/%.c=$(BUILD)/%.o)
 TARGET := btree_engine
 
