@@ -6,6 +6,7 @@
 #include "btree.h"
 #include "storage.h"
 #include "buffer_pool.h"
+#include "wal.h"
 
 static void test_page_init(void)
 {
@@ -196,8 +197,10 @@ static btree_error_t mem_read(void *ctx, page_id_t pid, page_t *page)
 static btree_error_t mem_write(void *ctx, page_id_t pid, const page_t *page)
 {
     mem_store_t *s = (mem_store_t *)ctx;
-    if (pid >= (page_id_t)s->num_pages)
+    if (pid >= MEM_MAX_PAGES)
         return BTREE_IO_ERROR;
+    if (pid >= (page_id_t)s->num_pages)
+        s->num_pages = (int)(pid + 1);
     s->pages[pid] = *page;
     return BTREE_OK;
 }
@@ -880,6 +883,278 @@ static void test_buffer_pool_persistence(void)
     printf("  PASSED\n\n");
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  WAL 测试
+ * ════════════════════════════════════════════════════════════════ */
+
+/* ─── 测试：WAL 页级恢复（使用内存存储） ─── */
+
+static void test_wal_page_recovery(void)
+{
+    printf("== test_wal_page_recovery ==\n");
+
+    const char *wal_path = "test_wal_page.wal";
+    remove(wal_path);
+
+    /* 第一轮：通过 WAL 写入页到 mem_store */
+    static mem_store_t store; /* static 避免栈溢出 (mem_store_t ≈ 8MB) */
+    mem_store_init(&store);
+    wal_t *wal = wal_create(wal_path,
+                             mem_read, mem_write, mem_alloc, &store);
+
+    page_id_t pids[10];
+    for (int i = 0; i < 10; i++)
+    {
+        wal_alloc(wal, &pids[i], PAGE_LEAF);
+        page_t pg;
+        page_init(&pg, pids[i], PAGE_LEAF);
+
+        /* 写入一个带标记的叶子记录 */
+        char k[8], v[8];
+        snprintf(k, sizeof(k), "k%03d", i);
+        snprintf(v, sizeof(v), "v%03d", i);
+        uint8_t buf[64];
+        leaf_rec_pack(buf, (const uint8_t *)k, 4, (const uint8_t *)v, 4, false);
+        page_alloc_slot(&pg, buf, leaf_rec_size(4, 4));
+
+        wal_write(wal, pids[i], &pg);
+    }
+
+    uint32_t n = wal_num_entries(wal);
+    printf("  WAL entries before destroy: %u (expect 10)\n", n);
+    wal_destroy(wal);
+
+    /* 第二轮：用空的 mem_store 恢复 */
+    static mem_store_t recovered; /* static 避免栈溢出 */
+    mem_store_init(&recovered);
+    wal_t *wal2 = wal_create(wal_path,
+                              mem_read, mem_write, mem_alloc, &recovered);
+
+    btree_error_t err = wal_recover(wal2);
+    printf("  wal_recover err: %d (expect 0)\n", err);
+    printf("  WAL entries after recover: %u (expect 0)\n",
+           wal_num_entries(wal2));
+
+    /* 验证恢复后的数据 */
+    int ok = 0;
+    for (int i = 0; i < 10; i++)
+    {
+        page_t pg;
+        if (mem_read(&recovered, pids[i], &pg) != BTREE_OK)
+            continue;
+        if (page_num_slots(&pg) != 1)
+            continue;
+        const uint8_t *r = page_slot_data_c(&pg, 0);
+        if (!r) continue;
+        char k[8], v[8];
+        snprintf(k, sizeof(k), "k%03d", i);
+        snprintf(v, sizeof(v), "v%03d", i);
+        if (memcmp(leaf_key_ptr_c(r), k, 4) == 0 &&
+            memcmp(leaf_val_ptr_c(r), v, 4) == 0)
+            ok++;
+    }
+    printf("  recovered pages: %d/10\n", ok);
+
+    wal_destroy(wal2);
+    remove(wal_path);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：WAL + 缓冲池 + 文件存储集成 ─── */
+
+static void test_wal_crash_recovery(void)
+{
+    printf("== test_wal_crash_recovery ==\n");
+
+    const char *store_path = "test_wal_crash.bt";
+    const char *wal_path   = "test_wal_crash.wal";
+    remove(store_path);
+    remove(wal_path);
+
+    int const N = 300;
+    char key[8], val[8];
+    uint8_t buf[64];
+    uint16_t len;
+
+    /* ---- 第一轮：正常写入 ---- */
+    btree_storage_t *store = btree_storage_create(store_path);
+    wal_t *wal = wal_create(wal_path,
+                             btree_storage_read,
+                             btree_storage_write,
+                             btree_storage_alloc,
+                             store);
+    btree_buffer_pool_t *bp = bp_create(0,
+                                         wal_read, wal_write, wal_alloc, wal);
+    btree_t *tree = btree_create(compare_default,
+                                  bp_read, bp_write, bp_alloc, bp);
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    bp_flush_all(bp);
+    btree_storage_set_root_id(store, btree_root_id(tree));
+    page_id_t saved_root = btree_root_id(tree);
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    wal_destroy(wal);
+    btree_storage_close(store);
+
+    /* ---- "模拟崩溃"：删除存储文件，WAL 文件保留 ---- */
+    remove(store_path);
+
+    /* ---- 第二轮：通过 WAL 恢复到新的存储文件 ---- */
+    store = btree_storage_create(store_path);
+    wal = wal_create(wal_path,
+                     btree_storage_read,
+                     btree_storage_write,
+                     btree_storage_alloc,
+                     store);
+
+    btree_error_t err = wal_recover(wal);
+    printf("  wal_recover: %d (expect 0)\n", err);
+
+    /* 用保存的 root_id 打开 btree */
+    bp = bp_create(0, wal_read, wal_write, wal_alloc, wal);
+    tree = btree_open(compare_default,
+                       bp_read, bp_write, bp_alloc, bp, saved_root);
+
+    int ok = 0;
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  recovered via WAL after crash: %d/%d (expect %d)\n", ok, N, N);
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    wal_destroy(wal);
+    btree_storage_close(store);
+    remove(store_path);
+    remove(wal_path);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：WAL 完整持久化（含 root_id 恢复） ─── */
+
+static void test_wal_full_persistence(void)
+{
+    printf("== test_wal_full_persistence ==\n");
+
+    const char *store_path = "test_wal_full.bt";
+    const char *wal_path   = "test_wal_full.wal";
+    remove(store_path);
+    remove(wal_path);
+
+    int const N = 500;
+    char key[8], val[8];
+    uint8_t buf[64];
+    uint16_t len;
+
+    /* ── 第一轮：标准写入 ── */
+    btree_storage_t *store = btree_storage_create(store_path);
+    btree_buffer_pool_t *bp = bp_create(0,
+                                         btree_storage_read,
+                                         btree_storage_write,
+                                         btree_storage_alloc,
+                                         store);
+    btree_t *tree = btree_create(compare_default,
+                                  bp_read, bp_write, bp_alloc, bp);
+
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    bp_flush_all(bp);
+    btree_storage_set_root_id(store, btree_root_id(tree));
+    page_id_t saved_root = btree_root_id(tree);
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    btree_storage_close(store);
+
+    /* ── 第二轮：通过 WAL 包装重新打开 ── */
+    store = btree_storage_open(store_path);
+    wal_t *wal = wal_create(wal_path,
+                             btree_storage_read,
+                             btree_storage_write,
+                             btree_storage_alloc,
+                             store);
+
+    /* 如果 WAL 文件有残留日志，先恢复 */
+    if (wal_num_entries(wal) > 0)
+        wal_recover(wal);
+
+    bp = bp_create(0, wal_read, wal_write, wal_alloc, wal);
+    tree = btree_open(compare_default,
+                       bp_read, bp_write, bp_alloc, bp, saved_root);
+
+    int ok = 0;
+    for (int i = 0; i < N; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  reopen via WAL: %d/%d (expect %d)\n", ok, N, N);
+
+    /* 写入一些新数据验证 WAL 正常工作 */
+    for (int i = N; i < N + 100; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        btree_put(tree, (const uint8_t *)key, 4, (const uint8_t *)val, 4);
+    }
+
+    bp_flush_all(bp);
+    btree_storage_set_root_id(store, btree_root_id(tree));
+    page_id_t new_root = btree_root_id(tree);
+
+    btree_destroy(tree);
+    bp_destroy(bp);
+    wal_destroy(wal);
+    btree_storage_close(store);
+
+    /* ── 第三轮：验证新增数据 ── */
+    store = btree_storage_open(store_path);
+    tree = btree_open(compare_default,
+                       btree_storage_read, btree_storage_write,
+                       btree_storage_alloc, store, new_root);
+
+    ok = 0;
+    for (int i = 0; i < N + 100; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        btree_error_t e = btree_get(tree, (const uint8_t *)key, 4, buf, &len);
+        if (e == BTREE_OK && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    printf("  final verify: %d/%d (expect %d)\n", ok, N + 100, N + 100);
+
+    btree_destroy(tree);
+    btree_storage_close(store);
+    remove(store_path);
+    remove(wal_path);
+    printf("  PASSED\n\n");
+}
+
 int main(void)
 {
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
@@ -914,6 +1189,12 @@ int main(void)
     test_buffer_pool_basic();
     test_buffer_pool_eviction();
     test_buffer_pool_persistence();
+
+    printf("=== WAL 验证 ===\n\n");
+
+    test_wal_page_recovery();
+    test_wal_crash_recovery();
+    test_wal_full_persistence();
 
     printf("=== 全部测试通过 ===\n");
     return 0;
