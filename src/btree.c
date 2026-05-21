@@ -2,6 +2,7 @@
 #include "btree.h"
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #define BTREE_MAX_DEPTH 64
 
@@ -14,6 +15,7 @@ struct btree
     btree_alloc_page_t alloc_page;
     void *io_ctx;
     page_id_t root_id;
+    pthread_rwlock_t rwlock;
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -379,6 +381,9 @@ btree_t *btree_create(btree_compare_t cmp,
         return NULL;
     }
     tree->root_id = root_id;
+
+    pthread_rwlock_init(&tree->rwlock, NULL);
+
     return tree;
 }
 
@@ -399,6 +404,9 @@ btree_t *btree_open(btree_compare_t cmp,
     tree->alloc_page = alloc_page;
     tree->io_ctx = io_ctx;
     tree->root_id = root_id;
+
+    pthread_rwlock_init(&tree->rwlock, NULL);
+
     return tree;
 }
 
@@ -413,8 +421,13 @@ void *btree_context(btree_t *tree)                { return tree->io_ctx; }
 
 void btree_destroy(btree_t *tree)
 {
+    pthread_rwlock_destroy(&tree->rwlock);
     free(tree);
 }
+
+void btree_lock_read(btree_t *tree)   { pthread_rwlock_rdlock(&tree->rwlock); }
+void btree_lock_write(btree_t *tree)  { pthread_rwlock_wrlock(&tree->rwlock); }
+void btree_unlock(btree_t *tree)      { pthread_rwlock_unlock(&tree->rwlock); }
 
 btree_error_t btree_get(btree_t *tree,
                         const uint8_t *key, uint16_t key_len,
