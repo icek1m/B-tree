@@ -9,6 +9,7 @@
 #include "wal.h"
 #include "cursor.h"
 #include "txn.h"
+#include <pthread.h>
 
 static void test_page_init(void)
 {
@@ -1754,6 +1755,276 @@ static void test_txn_delete_in_txn(void)
     printf("  PASSED\n\n");
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  并发安全性测试
+ * ════════════════════════════════════════════════════════════════ */
+
+typedef struct
+{
+    btree_t *tree;
+    int id;
+    int start;       /* key 起始偏移（写入者使用） */
+    int num_records;
+    int result;
+} conc_arg_t;
+
+/* 在单次只读事务中读取指定数量的预期记录 */
+static int conc_read_all(btree_t *tree, int n)
+{
+    char key[16], val[16];
+    uint8_t buf[64];
+    uint16_t len;
+    int ok = 0;
+
+    txn_t *txn = txn_begin(tree, TXN_READ_ONLY);
+    if (!txn) return 0;
+
+    for (int i = 0; i < n; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        len = sizeof(buf);
+        if (txn_get(txn, (const uint8_t *)key, 4, buf, &len) == BTREE_OK
+            && len == 4 && memcmp(buf, val, 4) == 0)
+            ok++;
+    }
+    txn_commit(txn);
+    return ok;
+}
+
+/* ─── 1. 多线程并发读取 ─── */
+
+static void *conc_reader_thread(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    a->result = conc_read_all(a->tree, a->num_records);
+    return NULL;
+}
+
+static void test_concurrent_readers(void)
+{
+    printf("== test_concurrent_readers ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 500;
+    populate_btree(tree, N);
+
+    int const NUM = 8;
+    pthread_t threads[NUM];
+    conc_arg_t args[NUM];
+
+    for (int i = 0; i < NUM; i++)
+    {
+        args[i] = (conc_arg_t){
+            .tree = tree, .id = i, .start = 0,
+            .num_records = N, .result = 0};
+        pthread_create(&threads[i], NULL, conc_reader_thread, &args[i]);
+    }
+
+    int total = 0;
+    for (int i = 0; i < NUM; i++)
+    {
+        pthread_join(threads[i], NULL);
+        total += args[i].result;
+    }
+    printf("  %d/%d verified across %d threads (expect %d)\n",
+           total, N * NUM, NUM, N * NUM);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 2. 多线程并发写入（互斥 key 范围）─── */
+
+static void *conc_writer_thread(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    int start = a->start;
+    int end = start + a->num_records;
+    char key[16], val[16];
+    int ok = 0;
+
+    txn_t *txn = txn_begin(a->tree, TXN_READ_WRITE);
+    if (!txn) { a->result = 0; return NULL; }
+
+    for (int i = start; i < end; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        if (txn_put(txn, (const uint8_t *)key, 4, (const uint8_t *)val, 4) == BTREE_OK)
+            ok++;
+    }
+    txn_commit(txn);
+    a->result = ok;
+    return NULL;
+}
+
+static void test_concurrent_writers(void)
+{
+    printf("== test_concurrent_writers ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const PER = 250;
+    int const NUM = 4;
+    int const TOTAL = PER * NUM;
+
+    pthread_t threads[NUM];
+    conc_arg_t args[NUM];
+
+    for (int i = 0; i < NUM; i++)
+    {
+        args[i] = (conc_arg_t){
+            .tree = tree, .id = i, .start = i * PER,
+            .num_records = PER, .result = 0};
+        pthread_create(&threads[i], NULL, conc_writer_thread, &args[i]);
+    }
+
+    int written = 0;
+    for (int i = 0; i < NUM; i++)
+    {
+        pthread_join(threads[i], NULL);
+        written += args[i].result;
+    }
+    printf("  %d/%d written (expect %d)\n", written, TOTAL, TOTAL);
+
+    int ok = conc_read_all(tree, TOTAL);
+    printf("  verify: %d/%d (expect %d)\n", ok, TOTAL, TOTAL);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 3. 读写并发混合 ─── */
+
+static void test_concurrent_mixed(void)
+{
+    printf("== test_concurrent_mixed ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const INIT = 200;
+    int const WR_PER = 200;
+    int const NUM_W = 2;
+    int const NUM_R = 4;
+    int const TOTAL = INIT + WR_PER * NUM_W;
+
+    populate_btree(tree, INIT);
+
+    /* 读取线程只读 INIT 条（保证不存在竞争） */
+    pthread_t w_thr[NUM_W], r_thr[NUM_R];
+    conc_arg_t w_arg[NUM_W], r_arg[NUM_R];
+
+    for (int i = 0; i < NUM_W; i++)
+    {
+        w_arg[i] = (conc_arg_t){
+            .tree = tree, .id = i,
+            .start = INIT + i * WR_PER, /* 写入 INIT 之后的全新 key */
+            .num_records = WR_PER, .result = 0};
+        pthread_create(&w_thr[i], NULL, conc_writer_thread, &w_arg[i]);
+    }
+
+    for (int i = 0; i < NUM_R; i++)
+    {
+        r_arg[i] = (conc_arg_t){
+            .tree = tree, .id = i,
+            .start = 0, .num_records = INIT, .result = 0};
+        pthread_create(&r_thr[i], NULL, conc_reader_thread, &r_arg[i]);
+    }
+
+    int written = 0;
+    for (int i = 0; i < NUM_W; i++)
+    {
+        pthread_join(w_thr[i], NULL);
+        written += w_arg[i].result;
+    }
+
+    int read_ok = 0;
+    for (int i = 0; i < NUM_R; i++)
+    {
+        pthread_join(r_thr[i], NULL);
+        read_ok += r_arg[i].result;
+    }
+
+    printf("  writers: %d/%d (expect %d)\n", written, WR_PER * NUM_W, WR_PER * NUM_W);
+    printf("  readers (INIT): %d/%d (expect %d)\n",
+           read_ok, INIT * NUM_R, INIT * NUM_R);
+
+    int ok = conc_read_all(tree, TOTAL);
+    printf("  final verify: %d/%d (expect %d)\n", ok, TOTAL, TOTAL);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 4. 多线程争夺写入相同 key ─── */
+
+static void *conc_contend_thread(void *arg)
+{
+    conc_arg_t *a = (conc_arg_t *)arg;
+    char key[16], val[16];
+    int ok = 0;
+
+    txn_t *txn = txn_begin(a->tree, TXN_READ_WRITE);
+    if (!txn) { a->result = 0; return NULL; }
+
+    for (int i = 0; i < a->num_records; i++)
+    {
+        snprintf(key, sizeof(key), "k%03d", i);
+        snprintf(val, sizeof(val), "v%03d", i);
+        if (txn_put(txn, (const uint8_t *)key, 4, (const uint8_t *)val, 4) == BTREE_OK)
+            ok++;
+    }
+    txn_commit(txn);
+    a->result = ok;
+    return NULL;
+}
+
+static void test_concurrent_write_contention(void)
+{
+    printf("== test_concurrent_write_contention ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    int const N = 200;
+    int const NUM = 4;
+
+    pthread_t threads[NUM];
+    conc_arg_t args[NUM];
+
+    for (int i = 0; i < NUM; i++)
+    {
+        args[i] = (conc_arg_t){
+            .tree = tree, .id = i, .start = 0,
+            .num_records = N, .result = 0};
+        pthread_create(&threads[i], NULL, conc_contend_thread, &args[i]);
+    }
+
+    for (int i = 0; i < NUM; i++)
+        pthread_join(threads[i], NULL);
+
+    /* 验证所有 key 均可正确读取 */
+    int ok = conc_read_all(tree, N);
+    printf("  %d threads × %d same keys: verify %d/%d (expect %d)\n",
+           NUM, N, ok, N, N);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
 int main(void)
 {
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
@@ -1814,6 +2085,13 @@ int main(void)
     test_txn_cursor();
     test_txn_write_then_read();
     test_txn_delete_in_txn();
+
+    printf("=== 并发安全性验证 ===\n\n");
+
+    test_concurrent_readers();
+    test_concurrent_writers();
+    test_concurrent_mixed();
+    test_concurrent_write_contention();
 
     printf("=== 全部测试通过 ===\n");
     return 0;
