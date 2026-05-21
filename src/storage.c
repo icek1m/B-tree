@@ -167,9 +167,25 @@ btree_error_t btree_storage_write(void *ctx, page_id_t pid, const page_t *page)
 {
     btree_storage_t *store = (btree_storage_t *)ctx;
 
+    /* 自动扩展：若写入页号 >= num_pages，扩展文件 */
     if (pid >= store->num_pages)
-        return BTREE_IO_ERROR;
+    {
+        /* 在文件尾追加零页直到 pid 可写 */
+        page_t zero;
+        memset(&zero, 0, sizeof(zero));
+        for (page_id_t i = store->num_pages; i <= pid; i++)
+        {
+            if (fseek(store->fp, page_offset(i), SEEK_SET) != 0)
+                return BTREE_IO_ERROR;
+            if (fwrite(&zero, PAGE_SIZE, 1, store->fp) != 1)
+                return BTREE_IO_ERROR;
+        }
+        store->num_pages = pid + 1;
+        if (write_header(store) != BTREE_OK)
+            return BTREE_IO_ERROR;
+    }
 
+    /* 写入页数据 */
     if (fseek(store->fp, page_offset(pid), SEEK_SET) != 0)
         return BTREE_IO_ERROR;
     if (fwrite(page, PAGE_SIZE, 1, store->fp) != 1)
