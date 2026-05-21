@@ -211,6 +211,146 @@ static btree_error_t set_parent_id(btree_t *tree, page_id_t child_pid,
 }
 
 /* ════════════════════════════════════════════════════════════════
+ *  删除再平衡辅助
+ * ════════════════════════════════════════════════════════════════ */
+
+/* 在父节点中查找 child_pid 的位置：-1 = first_child，≥0 = slot 索引 */
+static int find_pos_in_parent(const page_t *parent, page_id_t child_pid)
+{
+    if (page_get_first_child(parent) == child_pid)
+        return -1;
+    int n = page_num_slots(parent);
+    for (int i = 0; i < n; i++)
+    {
+        const uint8_t *r = page_slot_data_c(parent, i);
+        if (r && internal_child_id(r) == child_pid)
+            return i;
+    }
+    return -2;
+}
+
+/* 从叶子层开始向上再平衡。仅处理叶子合并 + 根收缩 */
+static btree_error_t rebalance_after_delete(btree_t *tree, path_t *path,
+                                             int leaf_level)
+{
+    int level = leaf_level;
+
+    while (level > 0)
+    {
+        page_t parent;
+        page_id_t parent_pid = path->entries[level - 1].pid;
+        btree_error_t err = tree->read_page(tree->io_ctx, parent_pid, &parent);
+        if (err != BTREE_OK) return err;
+
+        page_t node;
+        page_id_t node_pid = path->entries[level].pid;
+        err = tree->read_page(tree->io_ctx, node_pid, &node);
+        if (err != BTREE_OK) return err;
+
+        bool is_leaf = (page_get_type(&node) == PAGE_LEAF);
+        int n = page_num_slots(&node);
+
+        /* 阈值：叶子 < 2 或内部节点 < 1 时触发 */
+        if (is_leaf ? (n >= 2) : (n >= 1))
+            break;
+
+        int pos = find_pos_in_parent(&parent, node_pid);
+        if (pos < -1) return BTREE_CORRUPTED;
+
+        /* 确定合并方向：始终将右节点合并到左节点 */
+        page_id_t left_pid, right_pid;
+        int remove_slot;
+
+        if (pos >= 0)
+        {
+            left_pid = (pos == 0)
+                ? page_get_first_child(&parent)
+                : internal_child_id(page_slot_data_c(&parent, pos - 1));
+            right_pid = node_pid;
+            remove_slot = pos;
+        }
+        else
+        {
+            /* 当前节点是 first_child，右兄弟在 slot[0] */
+            left_pid = node_pid;
+            right_pid = internal_child_id(page_slot_data_c(&parent, 0));
+            remove_slot = 0;
+        }
+
+        page_t left, right;
+        err = tree->read_page(tree->io_ctx, left_pid, &left);
+        if (err != BTREE_OK) return err;
+        err = tree->read_page(tree->io_ctx, right_pid, &right);
+        if (err != BTREE_OK) return err;
+
+        /* 检查合并可行性 */
+        uint16_t left_data  = (uint16_t)(PAGE_SIZE - left.header.free_offset);
+        uint16_t right_data = (uint16_t)(PAGE_SIZE - right.header.free_offset);
+        uint16_t total_slots = (uint16_t)(page_num_slots(&left)
+                                        + page_num_slots(&right));
+        if ((uint16_t)(total_slots * sizeof(slot_t)) + left_data + right_data
+            > PAGE_SIZE - PAGE_HEADER_SIZE)
+            break; /* 装不下，放弃合并 */
+
+        /* 右叶记录追加到左叶 */
+        int nr = page_num_slots(&right);
+        for (int i = 0; i < nr; i++)
+        {
+            slot_t s = page_get_slot(&right, i);
+            const uint8_t *d = page_slot_data_c(&right, i);
+            if (d)
+                page_alloc_slot(&left, d, s.length);
+        }
+
+        /* 修正兄弟链表 */
+        page_id_t right_next = page_get_next(&right);
+        page_set_next(&left, right_next);
+        if (right_next != INVALID_PAGE_ID)
+        {
+            page_t nxt;
+            err = tree->read_page(tree->io_ctx, right_next, &nxt);
+            if (err != BTREE_OK) return err;
+            page_set_prev(&nxt, left_pid);
+            err = tree->write_page(tree->io_ctx, right_next, &nxt);
+            if (err != BTREE_OK) return err;
+        }
+
+        /* 从父节点移除分隔键槽位 */
+        page_remove_slot(&parent, remove_slot);
+
+        err = tree->write_page(tree->io_ctx, left_pid, &left);
+        if (err != BTREE_OK) return err;
+        err = tree->write_page(tree->io_ctx, parent_pid, &parent);
+        if (err != BTREE_OK) return err;
+
+        level--;
+    }
+
+    /* ── 根收缩 ── */
+    if (level == 0)
+    {
+        page_t root;
+        btree_error_t err = tree->read_page(tree->io_ctx,
+                                             path->entries[0].pid, &root);
+        if (err != BTREE_OK) return err;
+
+        if (page_get_type(&root) == PAGE_INTERNAL && page_num_slots(&root) == 0)
+        {
+            page_id_t child = page_get_first_child(&root);
+            tree->root_id = child;
+            page_t child_pg;
+            err = tree->read_page(tree->io_ctx, child, &child_pg);
+            if (err != BTREE_OK) return err;
+            page_set_parent(&child_pg, INVALID_PAGE_ID);
+            err = tree->write_page(tree->io_ctx, child, &child_pg);
+            if (err != BTREE_OK) return err;
+        }
+    }
+
+    return BTREE_OK;
+}
+
+/* ════════════════════════════════════════════════════════════════
  *  公共 API
  * ════════════════════════════════════════════════════════════════ */
 
@@ -294,10 +434,14 @@ btree_error_t btree_delete(btree_t *tree,
     if (!rec || leaf_is_deleted(rec))
         return BTREE_NOT_FOUND;
 
-    /* 逻辑删除：仅标记 is_deleted 标志 */
-    rec[2 + leaf_key_len(rec) + 2 + leaf_val_len(rec)] = 1;
+    /* 物理删除 */
+    page_remove_slot(leaf, idx);
+    err = tree->write_page(tree->io_ctx, leaf_id, leaf);
+    if (err != BTREE_OK)
+        return err;
 
-    return tree->write_page(tree->io_ctx, leaf_id, leaf);
+    /* 再平衡（叶子层到根） */
+    return rebalance_after_delete(tree, &path, path.depth - 1);
 }
 
 btree_error_t btree_put(btree_t *tree,
