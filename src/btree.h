@@ -28,6 +28,17 @@ extern "C"
 
     void btree_destroy(btree_t *tree);
 
+    /* 打开已有树的根节点（不分配新根） */
+    btree_t *btree_open(btree_compare_t cmp,
+                        btree_read_page_t read_page,
+                        btree_write_page_t write_page,
+                        btree_alloc_page_t alloc_page,
+                        void *io_ctx,
+                        page_id_t root_id);
+
+    /* 获取当前根节点页号 */
+    page_id_t btree_root_id(btree_t *tree);
+
     /* ─── 核心操作 ─── */
     btree_error_t btree_get(btree_t *tree,
                             const uint8_t *key, uint16_t key_len,

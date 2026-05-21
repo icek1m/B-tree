@@ -382,6 +382,31 @@ btree_t *btree_create(btree_compare_t cmp,
     return tree;
 }
 
+btree_t *btree_open(btree_compare_t cmp,
+                    btree_read_page_t read_page,
+                    btree_write_page_t write_page,
+                    btree_alloc_page_t alloc_page,
+                    void *io_ctx,
+                    page_id_t root_id)
+{
+    btree_t *tree = (btree_t *)calloc(1, sizeof(btree_t));
+    if (!tree)
+        return NULL;
+
+    tree->cmp = cmp;
+    tree->read_page = read_page;
+    tree->write_page = write_page;
+    tree->alloc_page = alloc_page;
+    tree->io_ctx = io_ctx;
+    tree->root_id = root_id;
+    return tree;
+}
+
+page_id_t btree_root_id(btree_t *tree)
+{
+    return tree->root_id;
+}
+
 void btree_destroy(btree_t *tree)
 {
     free(tree);
