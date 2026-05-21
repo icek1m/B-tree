@@ -8,6 +8,7 @@
 #include "buffer_pool.h"
 #include "wal.h"
 #include "cursor.h"
+#include "txn.h"
 
 static void test_page_init(void)
 {
@@ -1546,6 +1547,213 @@ static void test_cursor_buffer_pool(void)
     printf("  PASSED\n\n");
 }
 
+/* ════════════════════════════════════════════════════════════════
+ *  事务测试
+ * ════════════════════════════════════════════════════════════════ */
+
+/* ─── 测试：基本读事务 ─── */
+
+static void test_txn_basic_read(void)
+{
+    printf("== test_txn_basic_read ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 100);
+
+    txn_t *txn = txn_begin(tree, TXN_READ_ONLY);
+    printf("  txn_active: %d (expect 1)\n", txn_active(txn));
+
+    uint8_t buf[64];
+    uint16_t len = sizeof(buf);
+    btree_error_t e = txn_get(txn, (const uint8_t *)"k050", 4, buf, &len);
+    printf("  get k050: %d val='%.4s' len=%d (expect 0 'v050' 4)\n", e, buf, len);
+
+    e = txn_get(txn, (const uint8_t *)"k999", 4, buf, &len);
+    printf("  get k999: %d (expect %d)\n", e, BTREE_NOT_FOUND);
+
+    e = txn_commit(txn);
+    printf("  commit: %d (expect 0)\n", e);
+    /* txn 已释放，不再使用 */
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：写事务提交 ─── */
+
+static void test_txn_write_commit(void)
+{
+    printf("== test_txn_write_commit ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    txn_t *txn = txn_begin(tree, TXN_READ_WRITE);
+    printf("  txn_type: %d (expect %d)\n", txn_type(txn), TXN_READ_WRITE);
+
+    txn_put(txn, (const uint8_t *)"alpha", 5, (const uint8_t *)"apple", 5);
+    txn_put(txn, (const uint8_t *)"beta", 4, (const uint8_t *)"banana", 6);
+    txn_put(txn, (const uint8_t *)"gamma", 5, (const uint8_t *)"grape", 5);
+
+    btree_error_t e = txn_commit(txn);
+    printf("  commit: %d (expect 0)\n", e);
+
+    /* 使用非事务接口验证 */
+    uint8_t buf[64];
+    uint16_t len = sizeof(buf);
+    e = btree_get(tree, (const uint8_t *)"alpha", 5, buf, &len);
+    buf[len] = '\0';
+    printf("  get alpha: %d '%s' (expect 0 'apple')\n", e, buf);
+
+    len = sizeof(buf);
+    e = btree_get(tree, (const uint8_t *)"beta", 4, buf, &len);
+    buf[len] = '\0';
+    printf("  get beta:  %d '%s' (expect 0 'banana')\n", e, buf);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：只读事务拒绝写入 ─── */
+
+static void test_txn_readonly_reject_write(void)
+{
+    printf("== test_txn_readonly_reject_write ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    txn_t *txn = txn_begin(tree, TXN_READ_ONLY);
+    btree_error_t e = txn_put(txn, (const uint8_t *)"x", 1, (const uint8_t *)"y", 1);
+    printf("  put in read-only txn: %d (expect %d - CORRUPTED)\n",
+           e, BTREE_CORRUPTED);
+
+    e = txn_delete(txn, (const uint8_t *)"x", 1);
+    printf("  delete in read-only txn: %d (expect %d)\n", e, BTREE_CORRUPTED);
+
+    txn_commit(txn);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：事务内游标 ─── */
+
+static void test_txn_cursor(void)
+{
+    printf("== test_txn_cursor ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+    populate_btree(tree, 200);
+
+    txn_t *txn = txn_begin(tree, TXN_READ_ONLY);
+    btree_cursor_t *cur = txn_cursor_create(txn);
+    printf("  cursor created: %s (expect non-NULL)\n", cur ? "yes" : "no");
+
+    btree_cursor_seek(cur, (const uint8_t *)"k000", 4);
+    int ok = 0;
+    uint8_t key[8], val[8];
+    uint16_t klen, vlen;
+
+    while (btree_cursor_valid(cur))
+    {
+        klen = sizeof(key);
+        vlen = sizeof(val);
+        btree_cursor_get(cur, key, &klen, val, &vlen);
+        char ek[16], ev[16];
+        snprintf(ek, sizeof(ek), "k%03d", ok);
+        snprintf(ev, sizeof(ev), "v%03d", ok);
+        if (klen != 4 || vlen != 4
+            || memcmp(key, ek, 4) != 0
+            || memcmp(val, ev, 4) != 0)
+            break;
+        ok++;
+        btree_cursor_next(cur);
+    }
+    printf("  cursor forward: %d/200 (expect 200)\n", ok);
+
+    btree_cursor_destroy(cur);
+    txn_commit(txn);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：事务内写后读（同一事务） ─── */
+
+static void test_txn_write_then_read(void)
+{
+    printf("== test_txn_write_then_read ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    txn_t *txn = txn_begin(tree, TXN_READ_WRITE);
+    txn_put(txn, (const uint8_t *)"key1", 4, (const uint8_t *)"val1", 4);
+    txn_put(txn, (const uint8_t *)"key2", 4, (const uint8_t *)"val2", 4);
+
+    /* 同一事务内读取 */
+    uint8_t buf[64];
+    uint16_t len;
+    btree_error_t e;
+
+    len = sizeof(buf);
+    e = txn_get(txn, (const uint8_t *)"key1", 4, buf, &len);
+    buf[len] = '\0';
+    printf("  txn get key1: %d '%s' (expect 0 'val1')\n", e, buf);
+
+    len = sizeof(buf);
+    e = txn_get(txn, (const uint8_t *)"key2", 4, buf, &len);
+    buf[len] = '\0';
+    printf("  txn get key2: %d '%s' (expect 0 'val2')\n", e, buf);
+
+    txn_commit(txn);
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
+/* ─── 测试：事务内删除 ─── */
+
+static void test_txn_delete_in_txn(void)
+{
+    printf("== test_txn_delete_in_txn ==\n");
+
+    mem_store_t store;
+    mem_store_init(&store);
+    btree_t *tree = btree_create(compare_default,
+                                  mem_read, mem_write, mem_alloc, &store);
+
+    txn_t *txn = txn_begin(tree, TXN_READ_WRITE);
+    txn_put(txn, (const uint8_t *)"keep", 4, (const uint8_t *)"stay", 4);
+    txn_put(txn, (const uint8_t *)"gone", 4, (const uint8_t *)"bye", 3);
+    txn_delete(txn, (const uint8_t *)"gone", 4);
+    txn_commit(txn);
+
+    /* 验证 */
+    uint8_t buf[64];
+    uint16_t len = sizeof(buf);
+    btree_error_t e = btree_get(tree, (const uint8_t *)"keep", 4, buf, &len);
+    buf[len] = '\0';
+    printf("  get keep: %d '%s' (expect 0 'stay')\n", e, buf);
+
+    len = sizeof(buf);
+    e = btree_get(tree, (const uint8_t *)"gone", 4, buf, &len);
+    printf("  get gone: %d (expect %d)\n", e, BTREE_NOT_FOUND);
+
+    btree_destroy(tree);
+    printf("  PASSED\n\n");
+}
+
 int main(void)
 {
     printf("=== B+ Tree Data Engine — 数据结构层验证 ===\n\n");
@@ -1597,6 +1805,15 @@ int main(void)
     test_cursor_edge();
     test_cursor_mixed();
     test_cursor_buffer_pool();
+
+    printf("=== 事务验证 ===\n\n");
+
+    test_txn_basic_read();
+    test_txn_write_commit();
+    test_txn_readonly_reject_write();
+    test_txn_cursor();
+    test_txn_write_then_read();
+    test_txn_delete_in_txn();
 
     printf("=== 全部测试通过 ===\n");
     return 0;
