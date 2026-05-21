@@ -8,12 +8,12 @@
 /* ─── B+ 树句柄 ─── */
 struct btree
 {
-    btree_compare_t      cmp;
-    btree_read_page_t    read_page;
-    btree_write_page_t   write_page;
-    btree_alloc_page_t   alloc_page;
-    void                *io_ctx;
-    page_id_t            root_id;
+    btree_compare_t cmp;
+    btree_read_page_t read_page;
+    btree_write_page_t write_page;
+    btree_alloc_page_t alloc_page;
+    void *io_ctx;
+    page_id_t root_id;
 };
 
 /* ════════════════════════════════════════════════════════════════
@@ -22,10 +22,10 @@ struct btree
 
 typedef struct
 {
-    uint8_t **recs;       /* 每条记录独立 malloc 拷贝 */
-    uint16_t *lens;       /* 每条记录长度 */
-    int       count;
-    int       capacity;
+    uint8_t **recs; /* 每条记录独立 malloc 拷贝 */
+    uint16_t *lens; /* 每条记录长度 */
+    int count;
+    int capacity;
 } rec_array_t;
 
 static void rec_array_destroy(rec_array_t *ra)
@@ -43,7 +43,7 @@ static int rec_array_init(rec_array_t *ra, int capacity)
 {
     ra->recs = (uint8_t **)calloc((size_t)capacity, sizeof(uint8_t *));
     ra->lens = (uint16_t *)malloc((size_t)capacity * sizeof(uint16_t));
-    ra->count    = 0;
+    ra->count = 0;
     ra->capacity = capacity;
     if (!ra->recs || !ra->lens)
     {
@@ -72,7 +72,7 @@ static int rec_array_add(rec_array_t *ra, const uint8_t *data, uint16_t len)
  * 记录格式满足：offset 0 = key_len(uint16)，offset 2 = key_data。
  */
 static int rec_array_merge_sorted(rec_array_t *ra, const uint8_t *rec,
-                                   uint16_t len, btree_compare_t cmp)
+                                  uint16_t len, btree_compare_t cmp)
 {
     if (ra->count >= ra->capacity)
         return -1;
@@ -81,8 +81,8 @@ static int rec_array_merge_sorted(rec_array_t *ra, const uint8_t *rec,
     while (lo <= hi)
     {
         int mid = lo + (hi - lo) / 2;
-        int c   = cmp(rec + 2, read_u16(rec),
-                       ra->recs[mid] + 2, read_u16(ra->recs[mid]));
+        int c = cmp(rec + 2, read_u16(rec),
+                    ra->recs[mid] + 2, read_u16(ra->recs[mid]));
         if (c < 0)
             hi = mid - 1;
         else
@@ -111,7 +111,7 @@ static int rec_array_merge_sorted(rec_array_t *ra, const uint8_t *rec,
 
 /* 内部节点：返回 key 应下降到的子节点页号 */
 static page_id_t internal_find_child(const page_t *page, btree_compare_t cmp,
-                                      const uint8_t *key, uint16_t key_len)
+                                     const uint8_t *key, uint16_t key_len)
 {
     int n = page_num_slots(page);
     if (n == 0)
@@ -139,7 +139,7 @@ static page_id_t internal_find_child(const page_t *page, btree_compare_t cmp,
  * insert_pos 是最靠左的插入位置（保持全部 key 有序）。
  */
 static int leaf_find_key(const page_t *page, btree_compare_t cmp,
-                          const uint8_t *key, uint16_t key_len)
+                         const uint8_t *key, uint16_t key_len)
 {
     int lo = 0, hi = page_num_slots(page) - 1;
     while (lo <= hi)
@@ -164,17 +164,17 @@ static int leaf_find_key(const page_t *page, btree_compare_t cmp,
 typedef struct
 {
     page_id_t pid;
-    page_t    page;
+    page_t page;
 } path_entry_t;
 
 typedef struct
 {
     path_entry_t entries[BTREE_MAX_DEPTH];
-    int          depth;
+    int depth;
 } path_t;
 
 static btree_error_t build_path(btree_t *tree, path_t *path,
-                                 const uint8_t *key, uint16_t key_len)
+                                const uint8_t *key, uint16_t key_len)
 {
     path->depth = 0;
     page_id_t pid = tree->root_id;
@@ -200,7 +200,7 @@ static btree_error_t build_path(btree_t *tree, path_t *path,
  * ════════════════════════════════════════════════════════════════ */
 
 static btree_error_t set_parent_id(btree_t *tree, page_id_t child_pid,
-                                    page_id_t parent_pid)
+                                   page_id_t parent_pid)
 {
     page_t pg;
     btree_error_t err = tree->read_page(tree->io_ctx, child_pid, &pg);
@@ -215,21 +215,21 @@ static btree_error_t set_parent_id(btree_t *tree, page_id_t child_pid,
  * ════════════════════════════════════════════════════════════════ */
 
 btree_t *btree_create(btree_compare_t cmp,
-                       btree_read_page_t read_page,
-                       btree_write_page_t write_page,
-                       btree_alloc_page_t alloc_page,
-                       void *io_ctx)
+                      btree_read_page_t read_page,
+                      btree_write_page_t write_page,
+                      btree_alloc_page_t alloc_page,
+                      void *io_ctx)
 {
     btree_t *tree = (btree_t *)calloc(1, sizeof(btree_t));
     if (!tree)
         return NULL;
 
-    tree->cmp         = cmp;
-    tree->read_page   = read_page;
-    tree->write_page  = write_page;
-    tree->alloc_page  = alloc_page;
-    tree->io_ctx      = io_ctx;
-    tree->root_id     = INVALID_PAGE_ID;
+    tree->cmp = cmp;
+    tree->read_page = read_page;
+    tree->write_page = write_page;
+    tree->alloc_page = alloc_page;
+    tree->io_ctx = io_ctx;
+    tree->root_id = INVALID_PAGE_ID;
 
     page_id_t root_id;
     btree_error_t err = alloc_page(io_ctx, &root_id, PAGE_LEAF);
@@ -248,8 +248,8 @@ void btree_destroy(btree_t *tree)
 }
 
 btree_error_t btree_get(btree_t *tree,
-                         const uint8_t *key, uint16_t key_len,
-                         uint8_t *val_out, uint16_t *val_len)
+                        const uint8_t *key, uint16_t key_len,
+                        uint8_t *val_out, uint16_t *val_len)
 {
     path_t path;
     btree_error_t err = build_path(tree, &path, key, key_len);
@@ -276,7 +276,7 @@ btree_error_t btree_get(btree_t *tree,
 }
 
 btree_error_t btree_delete(btree_t *tree,
-                            const uint8_t *key, uint16_t key_len)
+                           const uint8_t *key, uint16_t key_len)
 {
     path_t path;
     btree_error_t err = build_path(tree, &path, key, key_len);
@@ -301,8 +301,8 @@ btree_error_t btree_delete(btree_t *tree,
 }
 
 btree_error_t btree_put(btree_t *tree,
-                         const uint8_t *key, uint16_t key_len,
-                         const uint8_t *val, uint16_t val_len)
+                        const uint8_t *key, uint16_t key_len,
+                        const uint8_t *val, uint16_t val_len)
 {
     path_t path;
     btree_error_t err = build_path(tree, &path, key, key_len);
@@ -310,8 +310,8 @@ btree_error_t btree_put(btree_t *tree,
         return err;
 
     /* ── 定位目标叶子 ── */
-    page_t    *leaf    = &path.entries[path.depth - 1].page;
-    page_id_t  leaf_id = path.entries[path.depth - 1].pid;
+    page_t *leaf = &path.entries[path.depth - 1].page;
+    page_id_t leaf_id = path.entries[path.depth - 1].pid;
 
     /* 若 key 已存在（含逻辑删除），先物理移除旧记录 */
     int idx = leaf_find_key(leaf, tree->cmp, key, key_len);
@@ -322,11 +322,11 @@ btree_error_t btree_put(btree_t *tree,
     }
 
     /* ── 打包新记录 ── */
-    uint8_t  rec_buf[PAGE_SIZE];
+    uint8_t rec_buf[PAGE_SIZE];
     uint16_t rec_len = leaf_rec_size(key_len, val_len);
     leaf_rec_pack(rec_buf, key, key_len, val, val_len, false);
 
-    int insert_pos = ~idx;           /* 二分给出的插入点 */
+    int insert_pos = ~idx; /* 二分给出的插入点 */
     int result = page_insert_slot(leaf, insert_pos, rec_buf, rec_len);
     if (result >= 0)
         return tree->write_page(tree->io_ctx, leaf_id, leaf);
@@ -345,12 +345,13 @@ btree_error_t btree_put(btree_t *tree,
     {
         const uint8_t *d = page_slot_data_c(leaf, i);
         slot_t s = page_get_slot(leaf, i);
-        if (d) rec_array_add(&ra, d, s.length);
+        if (d)
+            rec_array_add(&ra, d, s.length);
     }
     rec_array_merge_sorted(&ra, rec_buf, rec_len, tree->cmp);
 
     /* 2. 中点分割 */
-    int mid = ra.count / 2;     /* 右半首条记录索引 */
+    int mid = ra.count / 2; /* 右半首条记录索引 */
 
     /* 分隔键 = 右半首条记录的 key */
     uint16_t sep_len = read_u16(ra.recs[mid]);
@@ -363,15 +364,15 @@ btree_error_t btree_put(btree_t *tree,
     memcpy(sep_key_buf, ra.recs[mid] + 2, sep_len);
 
     /* 保存叶子原有链接 */
-    page_id_t old_prev   = page_get_prev(leaf);
-    page_id_t old_next   = page_get_next(leaf);
-    page_id_t parent_id  = page_get_parent(leaf);
+    page_id_t old_prev = page_get_prev(leaf);
+    page_id_t old_next = page_get_next(leaf);
+    page_id_t parent_id = page_get_parent(leaf);
 
     /* 3. 重写左半到原叶子 */
     page_init(leaf, leaf_id, PAGE_LEAF);
     page_set_parent(leaf, parent_id);
     page_set_prev(leaf, old_prev);
-    page_set_next(leaf, leaf_id);   /* 临时自指，后续创建右页后修正 */
+    page_set_next(leaf, leaf_id); /* 临时自指，后续创建右页后修正 */
 
     for (int i = 0; i < mid; i++)
         page_alloc_slot(leaf, ra.recs[i], ra.lens[i]);
@@ -425,10 +426,10 @@ btree_error_t btree_put(btree_t *tree,
      *  分隔键上溯传播
      * ═══════════════════════════════════════════════════════════ */
 
-    page_id_t cur_pid   = new_pid;    /* 新分裂出的页号 */
-    uint8_t  *cur_sep   = sep_key_buf;
-    uint16_t  cur_sep_len = sep_len;
-    int       level     = path.depth - 2;   /* 父节点所在层次 */
+    page_id_t cur_pid = new_pid; /* 新分裂出的页号 */
+    uint8_t *cur_sep = sep_key_buf;
+    uint16_t cur_sep_len = sep_len;
+    int level = path.depth - 2; /* 父节点所在层次 */
 
     for (;;)
     {
@@ -459,7 +460,7 @@ btree_error_t btree_put(btree_t *tree,
         }
 
         /* 读父节点 */
-        page_t    parent_pg;
+        page_t parent_pg;
         page_id_t parent_pid = path.entries[level].pid;
 
         err = tree->read_page(tree->io_ctx, parent_pid, &parent_pg);
@@ -479,7 +480,7 @@ btree_error_t btree_put(btree_t *tree,
             int m = lo + (hi - lo) / 2;
             const uint8_t *r = page_slot_data_c(&parent_pg, m);
             int c = tree->cmp(cur_sep, cur_sep_len,
-                               internal_key_ptr_c(r), internal_key_len(r));
+                              internal_key_ptr_c(r), internal_key_len(r));
             if (c < 0)
                 hi = m - 1;
             else
@@ -508,15 +509,16 @@ btree_error_t btree_put(btree_t *tree,
         {
             const uint8_t *d = page_slot_data_c(&parent_pg, i);
             slot_t s = page_get_slot(&parent_pg, i);
-            if (d) rec_array_add(&ra2, d, s.length);
+            if (d)
+                rec_array_add(&ra2, d, s.length);
         }
         rec_array_merge_sorted(&ra2, internal_buf, internal_len, tree->cmp);
 
         int mid2 = ra2.count / 2;
 
-        uint8_t  *median_rec    = ra2.recs[mid2];
-        uint16_t  median_key_len = read_u16(median_rec);
-        page_id_t median_child   = internal_child_id(median_rec);
+        uint8_t *median_rec = ra2.recs[mid2];
+        uint16_t median_key_len = read_u16(median_rec);
+        page_id_t median_child = internal_child_id(median_rec);
 
         /* 保存新旧分隔键信息，替换 cur_sep */
         uint8_t *new_sep = (uint8_t *)malloc(median_key_len);
@@ -530,7 +532,7 @@ btree_error_t btree_put(btree_t *tree,
 
         /* 重写左半 */
         page_id_t old_first_child = page_get_first_child(&parent_pg);
-        page_id_t old_parent      = page_get_parent(&parent_pg);
+        page_id_t old_parent = page_get_parent(&parent_pg);
 
         page_init(&parent_pg, parent_pid, PAGE_INTERNAL);
         page_set_parent(&parent_pg, old_parent);
@@ -571,9 +573,9 @@ btree_error_t btree_put(btree_t *tree,
 
         /* 替换分隔键，进入下一轮 */
         free(cur_sep);
-        cur_sep     = new_sep;
+        cur_sep = new_sep;
         cur_sep_len = median_key_len;
-        cur_pid     = new_internal_pid;
+        cur_pid = new_internal_pid;
         level--;
     }
 

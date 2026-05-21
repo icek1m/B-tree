@@ -5,23 +5,25 @@
 #include "comparator.h"
 #include "btree.h"
 
-static void test_page_init(void) {
+static void test_page_init(void)
+{
     printf("== test_page_init ==\n");
     page_t pg;
     page_init(&pg, 42, PAGE_LEAF);
 
-    printf("  page_id       = %u (expect 42)\n",  page_get_id(&pg));
-    printf("  type          = %d (expect %d)\n",  page_get_type(&pg), PAGE_LEAF);
-    printf("  num_slots     = %d (expect 0)\n",   page_num_slots(&pg));
-    printf("  free_offset   = %u (expect %d)\n",  pg.header.free_offset, PAGE_HEADER_SIZE);
-    printf("  free_size     = %u (expect %d)\n",  pg.header.free_size, PAGE_SIZE - PAGE_HEADER_SIZE);
-    printf("  parent        = %u (expect 0)\n",   page_get_parent(&pg));
+    printf("  page_id       = %u (expect 42)\n", page_get_id(&pg));
+    printf("  type          = %d (expect %d)\n", page_get_type(&pg), PAGE_LEAF);
+    printf("  num_slots     = %d (expect 0)\n", page_num_slots(&pg));
+    printf("  free_offset   = %u (expect %d)\n", pg.header.free_offset, PAGE_HEADER_SIZE);
+    printf("  free_size     = %u (expect %d)\n", pg.header.free_size, PAGE_SIZE - PAGE_HEADER_SIZE);
+    printf("  parent        = %u (expect 0)\n", page_get_parent(&pg));
     printf("  prev/next     = %u / %u (expect 0/0)\n", page_get_prev(&pg), page_get_next(&pg));
-    printf("  first_child   = %u (expect 0)\n",   page_get_first_child(&pg));
+    printf("  first_child   = %u (expect 0)\n", page_get_first_child(&pg));
     printf("  PASSED\n\n");
 }
 
-static void test_leaf_slot_alloc(void) {
+static void test_leaf_slot_alloc(void)
+{
     printf("== test_leaf_slot_alloc ==\n");
     page_t pg;
     page_init(&pg, 1, PAGE_LEAF);
@@ -40,7 +42,7 @@ static void test_leaf_slot_alloc(void) {
     uint8_t key3[] = "gamma";
     uint8_t val3[] = "grape";
     uint8_t buf3[64];
-    leaf_rec_pack(buf3, key3, 5, val3, 5, true);  /* 逻辑删除 */
+    leaf_rec_pack(buf3, key3, 5, val3, 5, true); /* 逻辑删除 */
 
     int idx1 = page_alloc_slot(&pg, buf1, leaf_rec_size(5, 5));
     int idx2 = page_alloc_slot(&pg, buf2, leaf_rec_size(4, 6));
@@ -53,7 +55,7 @@ static void test_leaf_slot_alloc(void) {
     const uint8_t *r1 = page_slot_data_c(&pg, 0);
     printf("  slot[0] key  = %s (expect 'alpha')\n", leaf_key_ptr_c(r1));
     printf("  slot[0] val  = %s (expect 'apple')\n", leaf_val_ptr_c(r1));
-    printf("  slot[0] del  = %d (expect 0)\n",       leaf_is_deleted(r1));
+    printf("  slot[0] del  = %d (expect 0)\n", leaf_is_deleted(r1));
 
     /* 验证第三条被标记删除 */
     const uint8_t *r3 = page_slot_data_c(&pg, 2);
@@ -62,7 +64,8 @@ static void test_leaf_slot_alloc(void) {
     printf("  PASSED\n\n");
 }
 
-static void test_slot_remove_and_compact(void) {
+static void test_slot_remove_and_compact(void)
+{
     printf("== test_slot_remove_and_compact ==\n");
     page_t pg;
     page_init(&pg, 2, PAGE_LEAF);
@@ -73,7 +76,8 @@ static void test_slot_remove_and_compact(void) {
     leaf_rec_pack(buf, key, 1, val, 1, false);
     uint16_t rec_len = leaf_rec_size(1, 1);
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 5; i++)
+    {
         key[0] = (uint8_t)('A' + i);
         val[0] = (uint8_t)('a' + i);
         leaf_rec_pack(buf, key, 1, val, 1, false);
@@ -108,7 +112,8 @@ static void test_slot_remove_and_compact(void) {
     printf("  PASSED\n\n");
 }
 
-static void test_internal_records(void) {
+static void test_internal_records(void)
+{
     printf("== test_internal_records ==\n");
     page_t pg;
     page_init(&pg, 10, PAGE_INTERNAL);
@@ -123,23 +128,25 @@ static void test_internal_records(void) {
 
     int i1 = page_alloc_slot(&pg, buf, internal_rec_size(3));
     int i2 = page_alloc_slot(&pg, buf + internal_rec_size(3), internal_rec_size(3));
-    (void)i1; (void)i2;
+    (void)i1;
+    (void)i2;
 
     printf("  type          = %d (expect %d)\n", page_get_type(&pg), PAGE_INTERNAL);
     printf("  first_child   = %u (expect 100)\n", page_get_first_child(&pg));
-    printf("  num_slots     = %d (expect 2)\n",   page_num_slots(&pg));
+    printf("  num_slots     = %d (expect 2)\n", page_num_slots(&pg));
 
     const uint8_t *r0 = page_slot_data_c(&pg, 0);
     const uint8_t *r1 = page_slot_data_c(&pg, 1);
     printf("  slot[0] key   = %s (expect 'cat')\n", internal_key_ptr_c(r0));
-    printf("  slot[0] child = %u (expect 200)\n",   internal_child_id(r0));
+    printf("  slot[0] child = %u (expect 200)\n", internal_child_id(r0));
     printf("  slot[1] key   = %s (expect 'dog')\n", internal_key_ptr_c(r1));
-    printf("  slot[1] child = %u (expect 300)\n",   internal_child_id(r1));
+    printf("  slot[1] child = %u (expect 300)\n", internal_child_id(r1));
 
     printf("  PASSED\n\n");
 }
 
-static void test_comparator(void) {
+static void test_comparator(void)
+{
     printf("== test_comparator ==\n");
 
     int r1 = compare_default((const uint8_t *)"abc", 3, (const uint8_t *)"abd", 3);
@@ -166,7 +173,7 @@ static void test_comparator(void) {
 typedef struct
 {
     page_t pages[MEM_MAX_PAGES];
-    int    num_pages;
+    int num_pages;
 } mem_store_t;
 
 static void mem_store_init(mem_store_t *s)
@@ -213,13 +220,13 @@ static void test_btree_basic(void)
     mem_store_t store;
     mem_store_init(&store);
     btree_t *tree = btree_create(compare_default,
-                                  mem_read, mem_write, mem_alloc, &store);
+                                 mem_read, mem_write, mem_alloc, &store);
     uint8_t buf[64];
     uint16_t len;
 
-    btree_put(tree, (const uint8_t *)"alpha", 5, (const uint8_t *)"apple",  5);
-    btree_put(tree, (const uint8_t *)"beta",  4, (const uint8_t *)"banana", 6);
-    btree_put(tree, (const uint8_t *)"gamma", 5, (const uint8_t *)"grape",  5);
+    btree_put(tree, (const uint8_t *)"alpha", 5, (const uint8_t *)"apple", 5);
+    btree_put(tree, (const uint8_t *)"beta", 4, (const uint8_t *)"banana", 6);
+    btree_put(tree, (const uint8_t *)"gamma", 5, (const uint8_t *)"grape", 5);
 
     len = sizeof(buf);
     printf("  get alpha:  %d ", btree_get(tree, (const uint8_t *)"alpha", 5, buf, &len));
@@ -253,7 +260,7 @@ static void test_btree_update(void)
     mem_store_t store;
     mem_store_init(&store);
     btree_t *tree = btree_create(compare_default,
-                                  mem_read, mem_write, mem_alloc, &store);
+                                 mem_read, mem_write, mem_alloc, &store);
     uint8_t buf[64];
     uint16_t len;
 
@@ -279,12 +286,12 @@ static void test_btree_delete(void)
     mem_store_t store;
     mem_store_init(&store);
     btree_t *tree = btree_create(compare_default,
-                                  mem_read, mem_write, mem_alloc, &store);
+                                 mem_read, mem_write, mem_alloc, &store);
     uint8_t buf[64];
     uint16_t len;
 
-    btree_put(tree, (const uint8_t *)"live",  4, (const uint8_t *)"alive", 5);
-    btree_put(tree, (const uint8_t *)"dead",  4, (const uint8_t *)"gone",  4);
+    btree_put(tree, (const uint8_t *)"live", 4, (const uint8_t *)"alive", 5);
+    btree_put(tree, (const uint8_t *)"dead", 4, (const uint8_t *)"gone", 4);
 
     printf("  delete dead: %d (expect 0)\n",
            btree_delete(tree, (const uint8_t *)"dead", 4));
@@ -311,11 +318,11 @@ static void test_btree_overwrite_deleted(void)
     mem_store_t store;
     mem_store_init(&store);
     btree_t *tree = btree_create(compare_default,
-                                  mem_read, mem_write, mem_alloc, &store);
+                                 mem_read, mem_write, mem_alloc, &store);
     uint8_t buf[64];
     uint16_t len;
 
-    btree_put(tree, (const uint8_t *)"x", 1, (const uint8_t *)"first",  5);
+    btree_put(tree, (const uint8_t *)"x", 1, (const uint8_t *)"first", 5);
     btree_delete(tree, (const uint8_t *)"x", 1);
     btree_put(tree, (const uint8_t *)"x", 1, (const uint8_t *)"second", 6);
 
@@ -337,7 +344,7 @@ static void test_btree_split(void)
     mem_store_t store;
     mem_store_init(&store);
     btree_t *tree = btree_create(compare_default,
-                                  mem_read, mem_write, mem_alloc, &store);
+                                 mem_read, mem_write, mem_alloc, &store);
 
     int const N = 500;
     char key[8], val[8];
@@ -384,7 +391,7 @@ static void test_btree_reverse_insert(void)
     mem_store_t store;
     mem_store_init(&store);
     btree_t *tree = btree_create(compare_default,
-                                  mem_read, mem_write, mem_alloc, &store);
+                                 mem_read, mem_write, mem_alloc, &store);
 
     int const N = 200;
     char key[8], val[8];

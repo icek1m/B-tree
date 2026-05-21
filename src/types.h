@@ -6,18 +6,20 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define PAGE_SIZE       4096
+#define PAGE_SIZE 4096
 #define INVALID_PAGE_ID 0
 
 typedef uint32_t page_id_t;
 
-typedef enum {
+typedef enum
+{
     PAGE_UNDEFINED = 0,
-    PAGE_INTERNAL  = 1,
-    PAGE_LEAF      = 2,
+    PAGE_INTERNAL = 1,
+    PAGE_LEAF = 2,
 } page_type_t;
 
-typedef enum {
+typedef enum
+{
     BTREE_OK = 0,
     BTREE_NOT_FOUND,
     BTREE_PAGE_FULL,
