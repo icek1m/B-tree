@@ -107,16 +107,43 @@ void page_remove_slot(page_t *page, int idx)
     page->header.num_slots--;
     n--;
 
-    /* 2) 压缩：将记录从 PAGE_SIZE 向前连续排列
-     *    正向遍历 (0→n-1)，先处理高地址记录，避免覆盖未处理的源数据 */
+    if (n == 0)
+    {
+        page->header.free_offset = PAGE_SIZE;
+        page->header.free_size = PAGE_SIZE - PAGE_HEADER_SIZE;
+        return;
+    }
+
+    /* 2) 压缩：先拷贝所有记录到临时缓冲区，再按序写回。
+     *
+     *    为什么不能原地 memmove：
+     *      经过多次非顺序插入后，slot 索引与记录在页内的偏移位置不再相关。
+     *      按 slot 索引 0→N 顺序处理的原地压缩，可能让前一次写操作覆盖
+     *      后一次读操作的源数据（因为低 slot 索引的新写入位置在高地址区，
+     *      可能覆盖高 slot 索引的原始数据）。
+     *
+     *    临时缓冲区方案彻底避免重叠问题：
+     *      先完整读出所有记录，再重新写入正确位置。
+     */
+    uint8_t temp[PAGE_SIZE];
+    uint16_t data_pos = 0;
+
+    for (int i = 0; i < n; i++)
+    {
+        slot_t *s = (slot_t *)(slot_base + (size_t)i * sizeof(slot_t));
+        memcpy(temp + data_pos, page->bytes + s->offset, s->length);
+        data_pos += s->length;
+    }
+
     uint16_t rec_off = PAGE_SIZE;
+    data_pos = 0;
     for (int i = 0; i < n; i++)
     {
         slot_t *s = (slot_t *)(slot_base + (size_t)i * sizeof(slot_t));
         rec_off -= s->length;
-        if (s->offset != rec_off)
-            memmove(page->bytes + rec_off, page->bytes + s->offset, s->length);
+        memcpy(page->bytes + rec_off, temp + data_pos, s->length);
         s->offset = rec_off;
+        data_pos += s->length;
     }
 
     page->header.free_offset = rec_off;
